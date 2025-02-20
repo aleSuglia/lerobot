@@ -21,7 +21,7 @@ def main():
     output_directory.mkdir(parents=True, exist_ok=True)
 
     # # Select your device
-    device = torch.device("cuda")
+    device = torch.device("mps")
 
     # Number of offline training steps (we'll only do offline training for this example.)
     # Adjust as you prefer. 5000 steps are needed to get something worth evaluating.
@@ -85,7 +85,10 @@ def main():
     done = False
     while not done:
         for batch in dataloader:
-            batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+            batch = {
+                k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
+                for k, v in batch.items()
+            }
             loss, _ = policy.forward(batch)
             loss.backward()
             optimizer.step()
