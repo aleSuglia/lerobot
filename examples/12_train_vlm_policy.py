@@ -16,6 +16,7 @@ from transformers import AutoConfig, AutoProcessor
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.common.datasets.utils import dataset_to_policy_features
 from lerobot.common.policies.lightning import LerobotLightningWrapper
+from lerobot.common.policies.normalize import Normalize
 from lerobot.common.policies.vlm.configuration_vlm_policy import VLMPolicyConfig
 from lerobot.common.policies.vlm.modeling_vlm_policy import VLMPolicy
 from lerobot.configs.types import FeatureType
@@ -25,6 +26,7 @@ from lerobot.configs.types import FeatureType
 class VLMCollateFunction:
     processor: AutoProcessor
     config: VLMPolicyConfig
+    normalize_inputs: Normalize
 
     # creates a collate function for the VLM policy which uses the Qwen2VL preprocessor
     # to generate a batch of data from the dataset
@@ -37,16 +39,18 @@ class VLMCollateFunction:
         for data in batch:
             actions.append(data["action"])
             user_content = []
+            data = self.normalize_inputs(data)
 
             if data["observation.image"].dim() == 3:
                 data["observation.image"] = data["observation.image"].unsqueeze(0)
 
             for img, state in zip(data["observation.image"], data["observation.state"], strict=False):
                 user_content.append({"type": "image"})
+                rounded_state = [round(s, 2) for s in state.tolist()]
                 user_content.append(
                     {
                         "type": "text",
-                        "text": f"State: {state.tolist()}\n",
+                        "text": f"State: {rounded_state}\n",
                     }
                 )
                 images.append(img)
@@ -155,6 +159,7 @@ def main():
         # Load current action and 14 future actions with a 0.1 seconds spacing.
         "action": np.arange(0, 0.1 * num_action_chunk_size, 0.1),
     }
+    normalize_inputs = Normalize(cfg.input_features, cfg.normalization_mapping, dataset_metadata.stats)
 
     # We can then instantiate the dataset with these delta_timestamps configuration.
     dataset = LeRobotDataset("lerobot/pusht", delta_timestamps=delta_timestamps)
@@ -164,7 +169,7 @@ def main():
         batch_size=batch_size,
         shuffle=True,
         drop_last=True,
-        collate_fn=VLMCollateFunction(vlm_processor, cfg),
+        collate_fn=VLMCollateFunction(vlm_processor, cfg, normalize_inputs),
     )
 
     trainer = Trainer(max_steps=num_training_steps)
