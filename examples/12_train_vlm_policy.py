@@ -9,11 +9,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from lightning import Trainer
 from torch.utils.data import default_collate
 from transformers import AutoConfig, AutoProcessor
 
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.common.datasets.utils import dataset_to_policy_features
+from lerobot.common.policies.lightning import LerobotLightningWrapper
 from lerobot.common.policies.vlm.configuration_vlm_policy import VLMPolicyConfig
 from lerobot.common.policies.vlm.modeling_vlm_policy import VLMPolicy
 from lerobot.configs.types import FeatureType
@@ -95,6 +97,10 @@ def main():
     # # Select your device
     device = torch.device("mps")
 
+    # Data loading
+    num_workers = 0
+    batch_size = 5
+
     # Number of offline training steps (we'll only do offline training for this example.)
     # Adjust as you prefer. 5000 steps are needed to get something worth evaluating.
     training_steps = 5000
@@ -127,8 +133,7 @@ def main():
 
     # We can now instantiate our policy with this config and the dataset stats.
     policy = VLMPolicy(cfg, dataset_stats=dataset_metadata.stats)
-    policy.train()
-    policy.to(device)
+    policy = LerobotLightningWrapper(policy, learning_rate=1e-4, adam_beta1=0.9, adam_beta2=0.999)
 
     # In this case with the standard configuration for Diffusion Policy, it is equivalent to this:
     delta_timestamps = {
@@ -140,55 +145,23 @@ def main():
         "action": np.arange(0, 0.1 * num_action_chunk_size, 0.1),
     }
 
-    # delta_timestamps = {
-    #     # Load the previous image and state at -0.1 seconds before current frame,
-    #     # then load current image and state corresponding to 0.0 second.
-    #     "observation.image": np.arange(-1, 1, 0.1),
-    #     "observation.state": np.arange(-1, 1, 0.1),
-    #     # Load the previous action (-0.1), the next action to be executed (0.0),
-    #     # and 14 future actions with a 0.1 seconds spacing. All these actions will be
-    #     # used to supervise the policy.
-    #     "action": np.arange(-1, 1, 0.1),
-    # }
-
     # We can then instantiate the dataset with these delta_timestamps configuration.
     dataset = LeRobotDataset("lerobot/pusht", delta_timestamps=delta_timestamps)
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        num_workers=0,
-        batch_size=5,
+        num_workers=num_workers,
+        batch_size=batch_size,
         shuffle=True,
         pin_memory=device.type != "cpu",
         drop_last=True,
         collate_fn=VLMCollateFunction(vlm_processor, cfg),
     )
 
-    # Then we create our optimizer and dataloader for offline training.
-    optimizer = torch.optim.Adam(policy.parameters(), lr=1e-4)
+    trainer = Trainer(max_steps=training_steps)
 
-    # Run training loop.
-    step = 0
-    done = False
-    while not done:
-        for batch in dataloader:
-            batch = {
-                k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
-                for k, v in batch.items()
-            }
-            loss, _ = policy.forward(batch)
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+    trainer.fit(policy, dataloader)
 
-            if step % log_freq == 0:
-                print(f"step: {step} loss: {loss.item():.3f}")
-            step += 1
-            if step >= training_steps:
-                done = True
-                break
-
-    # Save a policy checkpoint.
-    policy.save_pretrained(output_directory)
+    policy.model.save_pretrained(output_directory)
 
 
 if __name__ == "__main__":

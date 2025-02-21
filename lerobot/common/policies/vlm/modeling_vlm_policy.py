@@ -1,4 +1,5 @@
 from collections import deque
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import torch
@@ -10,9 +11,26 @@ from transformers.models.qwen2_vl import (
 from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VisionTransformerPretrainedModel
 
 from lerobot.common.policies.normalize import Normalize, Unnormalize
-from lerobot.common.policies.pi0.modeling_pi0 import pad_vector, sample_beta
+from lerobot.common.policies.pi0.modeling_pi0 import sample_beta
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.vlm.configuration_vlm_policy import VLMPolicyConfig
+
+
+def pad_vector(vector, new_dim):
+    """Can be (batch_size x sequence_length x features_dimension)
+    or (batch_size x features_dimension)
+    """
+    if vector.shape[-1] == new_dim:
+        mask = torch.ones_like(vector, dtype=torch.bool)
+        return vector, mask
+    shape = list(vector.shape)
+    current_dim = shape[-1]
+    shape[-1] = new_dim
+    new_vector = torch.zeros(*shape, dtype=vector.dtype, device=vector.device)
+    new_vector[..., :current_dim] = vector
+    mask = torch.zeros(*shape, dtype=torch.bool, device=vector.device)
+    mask[..., :current_dim] = 1
+    return new_vector, mask
 
 
 class VLMBackbone(Qwen2VLPreTrainedModel):
@@ -356,6 +374,14 @@ class VLMBackbone(Qwen2VLPreTrainedModel):
         return hidden_states
 
 
+@dataclass
+class VLMPolicyOutput:
+    logits: torch.Tensor
+    loss: Optional[torch.Tensor] = None
+    hidden_states: Optional[Tuple[torch.Tensor]] = None
+    attentions: Optional[Tuple[torch.Tensor]] = None
+
+
 class VLMPolicy(PreTrainedPolicy):
     config_class = VLMPolicyConfig
     name = "vlm"
@@ -420,14 +446,13 @@ class VLMPolicy(PreTrainedPolicy):
     def _prepare_vlm_inputs(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         return {k: v for k, v in batch.items() if k != "action"}
 
-    def _compute_loss(self, action_hidden_states, actions, noise=None):
+    def _compute_loss(self, logits, actions, noise=None, actions_mask=None):
         u_t = noise - actions
 
-        v_t = self.action_out_proj(action_hidden_states).view(u_t.shape)
+        losses = F.mse_loss(logits.view(u_t.shape), u_t, reduction="none")
 
-        losses = F.mse_loss(u_t, v_t, reduction="none")
-
-        # TODO: ignore the dimensions that are masked
+        if actions_mask is not None:
+            losses = losses[actions_mask]
 
         return losses.mean()
 
@@ -443,8 +468,8 @@ class VLMPolicy(PreTrainedPolicy):
 
     def prepare_action(self, batch):
         """Pad action"""
-        actions = pad_vector(batch["action"], self.config.max_action_dim)
-        return actions
+        actions, actions_mask = pad_vector(batch["action"], self.config.max_action_dim)
+        return actions, actions_mask
 
     def sample_time(self, bsize, device):
         time_beta = sample_beta(1.5, 1.0, bsize, device)
@@ -456,12 +481,12 @@ class VLMPolicy(PreTrainedPolicy):
         batch: dict[str, torch.Tensor],
         noise: Optional[torch.Tensor] = None,
         time: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> VLMPolicyOutput:
         """Run the batch through the model and compute the loss for training or validation."""
         batch = self.normalize_inputs(batch)
         batch = self.normalize_targets(batch)
         inputs = self._prepare_vlm_inputs(batch)
-        actions = self.prepare_action(batch)
+        actions, actions_mask = self.prepare_action(batch)
 
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
@@ -471,16 +496,19 @@ class VLMPolicy(PreTrainedPolicy):
 
         time_expanded = time[:, None, None]
 
-        # they need to be added to the backbone
         noised_actions = time_expanded * noise + (1 - time_expanded) * actions
+        # action embedding that we add to the VLM backbone via a projection layer
         actions_embeds = self.action_in_proj(noised_actions)
-        hidden_states = self.vlm(**inputs, action_embeds=actions_embeds)
-        # no output_dict so returning None
 
-        # TODO: extract the action hidden states from the hidden states
+        hidden_states = self.vlm(**inputs, action_embeds=actions_embeds)
+
         action_mask = inputs["input_ids"] == self.config.action_start_token_id
         action_hidden_states = hidden_states[action_mask]
 
-        loss = self._compute_loss(action_hidden_states, actions, noise)
+        logits = self.action_out_proj(action_hidden_states)
+        loss = self._compute_loss(logits, actions, noise, actions_mask)
 
-        return loss, None
+        return VLMPolicyOutput(
+            logits=logits,
+            loss=loss,
+        )
