@@ -3,7 +3,7 @@
 Once you have trained a model with this script, you can try to evaluate it on
 examples/2_evaluate_pretrained_policy.py
 """
-
+import draccus
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -92,15 +92,14 @@ class VLMCollateFunction:
         inputs.update({"action": default_collate(actions)})
         return inputs
 
-
 def main():
     # Create a directory to store the training checkpoint.
     output_directory = Path("outputs/train/example_pusht_vlm")
     output_directory.mkdir(parents=True, exist_ok=True)
 
     # Data loading
-    num_workers = 0
-    batch_size = 5
+    num_workers = 8
+    batch_size = 128
 
     # Number of offline training steps (we'll only do offline training for this example.)
     # Adjust as you prefer. 5000 steps are needed to get something worth evaluating.
@@ -172,11 +171,11 @@ def main():
         collate_fn=VLMCollateFunction(vlm_processor, cfg, normalize_inputs),
     )
 
-    trainer = Trainer(max_steps=num_training_steps)
+    trainer = Trainer(max_steps=num_training_steps, default_root_dir=output_directory)
 
     trainer.fit(policy, dataloader)
 
-    policy.model.save_pretrained(output_directory)
+    print("---Finished training---")
 
 
 if __name__ == "__main__":

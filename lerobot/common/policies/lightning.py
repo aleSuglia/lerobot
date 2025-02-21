@@ -37,6 +37,3 @@ class LerobotLightningWrapper(LightningModule):
             num_training_steps=self.hparams.num_training_steps,
         )
         return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
-
-    def lr_scheduler_step(self, scheduler, metrics):
-        scheduler.step(metrics=metrics, epoch=self.current_epoch)  # timm's scheduler need the epoch value
