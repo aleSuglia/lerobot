@@ -94,9 +94,6 @@ def main():
     output_directory = Path("outputs/train/example_pusht_vlm")
     output_directory.mkdir(parents=True, exist_ok=True)
 
-    # # Select your device
-    device = torch.device("mps")
-
     # Data loading
     num_workers = 0
     batch_size = 5
@@ -106,6 +103,10 @@ def main():
     training_steps = 5000
     log_freq = 1
     num_action_chunk_size = 15
+
+    # Training stages
+    is_stage_one_training = True
+    is_stage_two_training = False
 
     # When starting from scratch (i.e. not from a pretrained policy), we need to specify 2 things before
     # creating the policy:
@@ -129,6 +130,8 @@ def main():
         input_features=input_features,
         output_features=output_features,
         chunk_size=num_action_chunk_size,
+        is_stage_one_training=is_stage_one_training,
+        is_stage_two_training=is_stage_two_training,
     )
 
     # We can now instantiate our policy with this config and the dataset stats.

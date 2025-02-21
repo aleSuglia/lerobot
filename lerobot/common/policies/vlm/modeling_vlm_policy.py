@@ -417,6 +417,21 @@ class VLMPolicy(PreTrainedPolicy):
         self.action_in_proj = torch.nn.Linear(self.config.max_action_dim, self.config.hidden_size)
         self.action_out_proj = torch.nn.Linear(self.config.hidden_size, self.config.max_action_dim)
 
+        if self.config.is_stage_one_training:
+            self.freeze_vlm_backbone()
+        elif self.config.is_stage_two_training:
+            self.freeze_vision_backbone()
+        else:  # always assume stage two training otherwise
+            self.freeze_vision_backbone()
+
+    def freeze_vlm_backbone(self):
+        for param in self.vlm.parameters():
+            param.requires_grad = False
+
+    def freeze_vision_backbone(self):
+        for param in self.vlm.visual.parameters():
+            param.requires_grad = False
+
     def get_optim_params(self) -> dict:
         return {"vlm": self.vlm.parameters()}
 

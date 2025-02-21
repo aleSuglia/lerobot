@@ -20,6 +20,12 @@ class VLMPolicyConfig(PreTrainedConfig, Qwen2VLConfig):
     # Decoding
     num_diffusion_steps: int = 10
 
+    # In the first stage of the training only the action adapter is trained.
+    is_stage_one_training: bool = False
+
+    # In the second stage of the training, we train everything but the vision encoder.
+    is_stage_two_training: bool = False
+
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
             "VISUAL": NormalizationMode.MEAN_STD,
