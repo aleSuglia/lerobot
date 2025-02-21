@@ -155,7 +155,6 @@ def main():
         num_workers=num_workers,
         batch_size=batch_size,
         shuffle=True,
-        pin_memory=device.type != "cpu",
         drop_last=True,
         collate_fn=VLMCollateFunction(vlm_processor, cfg),
     )
