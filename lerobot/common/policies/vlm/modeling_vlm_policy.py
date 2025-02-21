@@ -421,8 +421,6 @@ class VLMPolicy(PreTrainedPolicy):
             self.freeze_vlm_backbone()
         elif self.config.is_stage_two_training:
             self.freeze_vision_backbone()
-        else:  # always assume stage two training otherwise
-            self.freeze_vision_backbone()
 
     def freeze_vlm_backbone(self):
         for param in self.vlm.parameters():

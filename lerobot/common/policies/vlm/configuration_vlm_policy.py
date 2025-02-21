@@ -30,7 +30,7 @@ class VLMPolicyConfig(PreTrainedConfig, Qwen2VLConfig):
         default_factory=lambda: {
             "VISUAL": NormalizationMode.MEAN_STD,
             "STATE": NormalizationMode.MEAN_STD,
-            "ACTIONS": NormalizationMode.MEAN_STD,
+            "ACTION": NormalizationMode.MEAN_STD,
         }
     )
 
