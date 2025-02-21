@@ -100,7 +100,8 @@ def main():
 
     # Number of offline training steps (we'll only do offline training for this example.)
     # Adjust as you prefer. 5000 steps are needed to get something worth evaluating.
-    training_steps = 5000
+    num_training_steps = 5000
+    num_warmup_steps = 100
     log_freq = 1
     num_action_chunk_size = 15
 
@@ -136,7 +137,14 @@ def main():
 
     # We can now instantiate our policy with this config and the dataset stats.
     policy = VLMPolicy(cfg, dataset_stats=dataset_metadata.stats)
-    policy = LerobotLightningWrapper(policy, learning_rate=1e-4, adam_beta1=0.9, adam_beta2=0.999)
+    policy = LerobotLightningWrapper(
+        policy,
+        learning_rate=1e-4,
+        adam_beta1=0.9,
+        adam_beta2=0.999,
+        num_training_steps=num_training_steps,
+        num_warmup_steps=num_warmup_steps,
+    )
 
     # In this case with the standard configuration for Diffusion Policy, it is equivalent to this:
     delta_timestamps = {
@@ -159,7 +167,7 @@ def main():
         collate_fn=VLMCollateFunction(vlm_processor, cfg),
     )
 
-    trainer = Trainer(max_steps=training_steps)
+    trainer = Trainer(max_steps=num_training_steps)
 
     trainer.fit(policy, dataloader)
 

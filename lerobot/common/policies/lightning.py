@@ -1,5 +1,6 @@
 from lightning import LightningModule
 from torch.optim import AdamW
+from transformers import get_scheduler
 
 
 class LerobotLightningWrapper(LightningModule):
@@ -24,8 +25,18 @@ class LerobotLightningWrapper(LightningModule):
         return val_loss
 
     def configure_optimizers(self):
-        return AdamW(
+        optimizer = AdamW(
             self.parameters(),
             lr=self.hparams.learning_rate,
             betas=(self.hparams.adam_beta1, self.hparams.adam_beta2),
         )
+        scheduler = get_scheduler(
+            "cosine",
+            optimizer,
+            num_warmup_steps=self.hparams.num_warmup_steps,
+            num_training_steps=self.hparams.num_training_steps,
+        )
+        return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
+
+    def lr_scheduler_step(self, scheduler, metrics):
+        scheduler.step(metrics=metrics, epoch=self.current_epoch)  # timm's scheduler need the epoch value

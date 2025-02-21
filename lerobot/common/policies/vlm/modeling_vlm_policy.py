@@ -426,11 +426,11 @@ class VLMPolicy(PreTrainedPolicy):
 
     def freeze_vlm_backbone(self):
         for param in self.vlm.parameters():
-            param.requires_grad = False
+            param.requires_grad_(False)
 
     def freeze_vision_backbone(self):
         for param in self.vlm.visual.parameters():
-            param.requires_grad = False
+            param.requires_grad_(False)
 
     def get_optim_params(self) -> dict:
         return {"vlm": self.vlm.parameters()}
