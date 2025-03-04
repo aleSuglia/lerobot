@@ -120,9 +120,10 @@ def main(args):
     is_stage_one_training = args.is_stage_one_training
     is_stage_two_training = args.is_stage_two_training
 
-    if not is_stage_one_training and not is_stage_two_training:
-        print("Please specify at least one training stage. Assuming stage one training.")
-        is_stage_one_training = True
+    # TODO: put this back!
+    # if not is_stage_one_training and not is_stage_two_training:
+    #     print("Please specify at least one training stage. Assuming stage two training.")
+    #     is_stage_two_training = False
 
     # When starting from scratch (i.e. not from a pretrained policy), we need to specify 2 things before
     # creating the policy:
@@ -156,7 +157,7 @@ def main(args):
     policy = VLMPolicy(cfg, dataset_stats=dataset_metadata.stats)
     policy = LerobotLightningWrapper(
         policy,
-        model_config=cfg,
+        model_config=cfg.to_dict(),  # save the model config in the checkpoint
         dataset_stats=dataset_metadata.stats,
         learning_rate=args.learning_rate,
         num_training_steps=num_training_steps,

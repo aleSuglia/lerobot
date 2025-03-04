@@ -13,9 +13,9 @@ from transformers.models.qwen2_vl import (
 from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VisionTransformerPretrainedModel
 
 from lerobot.common.policies.normalize import Normalize, Unnormalize
-from lerobot.common.policies.pi0.modeling_pi0 import sample_beta
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.utils import populate_queues
+from lerobot.common.policies.vlm.action_heads import ActionInputAdapter, L1RegressionActionHead
 from lerobot.common.policies.vlm.configuration_vlm_policy import VLMPolicyConfig
 
 
@@ -415,8 +415,10 @@ class VLMPolicy(PreTrainedPolicy):
         self._queues = None
 
         self.vlm = VLMBackbone(config)
-        self.action_in_proj = torch.nn.Linear(self.config.max_action_dim, self.config.hidden_size)
-        self.action_out_proj = torch.nn.Linear(self.config.hidden_size, self.config.max_action_dim)
+        # the action adapter projects the action to the same dimension as the VLM backbone
+        self.action_in_proj = ActionInputAdapter(self.config)
+        # the action head projects the VLM backbone output to the action space
+        self.action_out_proj = L1RegressionActionHead(self.config)
 
         if self.config.is_stage_one_training:
             self.freeze_vlm_backbone()
@@ -491,35 +493,18 @@ class VLMPolicy(PreTrainedPolicy):
     def _prepare_vlm_inputs(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         return {k: v for k, v in batch.items() if k != "action"}
 
-    def _compute_loss(self, logits, actions, noise=None, actions_mask=None):
-        u_t = noise - actions
-
-        losses = F.mse_loss(logits.view(u_t.shape), u_t, reduction="none")
+    def _compute_loss(self, logits, actions, actions_mask=None):
+        losses = F.l1_loss(logits.view(actions.shape), actions, reduction="none")
 
         if actions_mask is not None:
             losses = losses[actions_mask]
 
         return losses.mean()
 
-    def sample_noise(self, shape, device):
-        noise = torch.normal(
-            mean=0.0,
-            std=1.0,
-            size=shape,
-            dtype=torch.float32,
-            device=device,
-        )
-        return noise
-
     def prepare_action(self, batch):
         """Pad action"""
         actions, actions_mask = pad_vector(batch["action"], self.config.max_action_dim)
         return actions, actions_mask
-
-    def sample_time(self, bsize, device):
-        time_beta = sample_beta(1.5, 1.0, bsize, device)
-        time = time_beta * 0.999 + 0.001
-        return time.to(dtype=torch.float32, device=device)
 
     def forward(
         self,
@@ -533,17 +518,7 @@ class VLMPolicy(PreTrainedPolicy):
         inputs = self._prepare_vlm_inputs(batch)
         actions, actions_mask = self.prepare_action(batch)
 
-        if noise is None:
-            noise = self.sample_noise(actions.shape, actions.device)
-
-        if time is None:
-            time = self.sample_time(actions.shape[0], actions.device)
-
-        time_expanded = time[:, None, None]
-
-        noised_actions = time_expanded * noise + (1 - time_expanded) * actions
-        # action embedding that we add to the VLM backbone via a projection layer
-        actions_embeds = self.action_in_proj(noised_actions)
+        actions_embeds = self.action_in_proj(actions)
 
         vlm_outputs = self.vlm(**inputs, action_embeds=actions_embeds)
 
@@ -552,7 +527,7 @@ class VLMPolicy(PreTrainedPolicy):
         action_hidden_states = hidden_states[action_mask]
 
         logits = self.action_out_proj(action_hidden_states)
-        loss = self._compute_loss(logits, actions, noise, actions_mask)
+        loss = self._compute_loss(logits, actions, actions_mask)
 
         return VLMPolicyOutput(
             logits=logits,

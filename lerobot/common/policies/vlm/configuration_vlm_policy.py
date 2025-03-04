@@ -26,6 +26,9 @@ class VLMPolicyConfig(PreTrainedConfig, Qwen2VLConfig):
     # In the second stage of the training, we train everything but the vision encoder.
     is_stage_two_training: bool = False
 
+    # Number of hidden layers for the action adapter
+    action_input_adapter_mlp_depth: int = 2
+
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
             "VISUAL": NormalizationMode.MEAN_STD,
