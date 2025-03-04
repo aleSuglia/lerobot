@@ -1,9 +1,11 @@
+import copy
 from collections import deque
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+from transformers.cache_utils import StaticCache
 from transformers.models.qwen2_vl import (
     Qwen2VLModel,
     Qwen2VLPreTrainedModel,
@@ -13,6 +15,7 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VisionTransforme
 from lerobot.common.policies.normalize import Normalize, Unnormalize
 from lerobot.common.policies.pi0.modeling_pi0 import sample_beta
 from lerobot.common.policies.pretrained import PreTrainedPolicy
+from lerobot.common.policies.utils import populate_queues
 from lerobot.common.policies.vlm.configuration_vlm_policy import VLMPolicyConfig
 
 
@@ -369,9 +372,7 @@ class VLMBackbone(Qwen2VLPreTrainedModel):
             cache_position=cache_position,
         )
 
-        hidden_states = outputs[0]
-
-        return hidden_states
+        return outputs
 
 
 @dataclass
@@ -436,13 +437,10 @@ class VLMPolicy(PreTrainedPolicy):
     def reset(self):
         """Clear observation and action queues. Should be called on `env.reset()`"""
         self._queues = {
-            "observation.state": deque(maxlen=self.config.n_obs_steps),
-            "action": deque(maxlen=self.config.n_action_steps),
+            "input_ids": deque(maxlen=self.config.n_obs_steps),
+            "action": deque(maxlen=self.config.chunk_size),
+            "pixel_values": deque(maxlen=self.config.n_obs_steps),
         }
-        if self.config.image_features:
-            self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
-        if self.config.env_state_feature:
-            self._queues["observation.environment_state"] = deque(maxlen=self.config.n_obs_steps)
 
     @torch.no_grad
     def select_action(
@@ -454,7 +452,41 @@ class VLMPolicy(PreTrainedPolicy):
         environment. It works by managing the actions in a queue and only calling `select_actions` when the
         queue is empty.
         """
-        return None
+        self.eval()
+
+        # if self.config.adapt_to_pi_aloha:
+        #     batch[OBS_ROBOT] = self._pi_aloha_decode_state(batch[OBS_ROBOT])
+
+        batch = self.normalize_inputs(batch)
+
+        # Note: It's important that this happens after stacking the images into a single key.
+        self._queues = populate_queues(self._queues, batch)
+
+        # Action queue logic for n_action_steps > 1. When the action_queue is depleted, populate it by
+        # querying the policy.
+        action_queue = self._queues["action"]
+        if len(action_queue) == 0:
+            # images, img_masks = self.prepare_images(batch)
+            # state = self.prepare_state(batch)
+            # lang_tokens, lang_masks = self.prepare_language(batch)
+
+            actions = self.sample_actions(batch)
+
+            # Unpad actions
+            original_action_dim = self.config.action_feature.shape[0]
+
+            actions = actions[:, :, :original_action_dim]
+
+            actions = self.unnormalize_outputs({"action": actions})["action"]
+
+            # if self.config.adapt_to_pi_aloha:
+            #     actions = self._pi_aloha_encode_actions(actions)
+
+            # `self.model.forward` returns a (batch_size, n_action_steps, action_dim) tensor, but the queue
+            # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
+            action_queue.extend(actions.transpose(0, 1))
+
+        return action_queue.popleft()
 
     def _prepare_vlm_inputs(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         return {k: v for k, v in batch.items() if k != "action"}
@@ -513,8 +545,9 @@ class VLMPolicy(PreTrainedPolicy):
         # action embedding that we add to the VLM backbone via a projection layer
         actions_embeds = self.action_in_proj(noised_actions)
 
-        hidden_states = self.vlm(**inputs, action_embeds=actions_embeds)
+        vlm_outputs = self.vlm(**inputs, action_embeds=actions_embeds)
 
+        hidden_states = vlm_outputs.last_hidden_state
         action_mask = inputs["input_ids"] == self.config.action_start_token_id
         action_hidden_states = hidden_states[action_mask]
 
@@ -525,3 +558,82 @@ class VLMPolicy(PreTrainedPolicy):
             logits=logits,
             loss=loss,
         )
+
+    @torch.inference_mode()
+    def sample_actions(self, batch, noise=None) -> torch.Tensor:
+        """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
+
+        bsize = batch["input_ids"].shape[0]
+        device = batch["input_ids"].device
+        batch = self.normalize_inputs(batch)
+        batch = self.normalize_targets(batch)
+        inputs = self._prepare_vlm_inputs(batch)
+
+        if noise is None:
+            actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
+            noise = self.sample_noise(actions_shape, device)
+
+        # run a forward pass without the action embeds to get the hidden states of the part that
+        # doesn't change so that we can prefill the cache
+        prefix_inputs = dict(inputs)
+        prefix_inputs["input_ids"] = inputs["prefix_input_ids"]
+        prefix_inputs["attention_mask"] = inputs["prefix_attention_mask"]
+        del prefix_inputs["prefix_input_ids"]
+        del prefix_inputs["prefix_attention_mask"]
+        # we use the StaticCache to cache the prompt prefix before the diffusion steps
+        prompt_cache = StaticCache(
+            config=self.config,
+            max_batch_size=bsize,
+            max_cache_len=inputs["input_ids"].shape[1],
+            device=device,
+            dtype=inputs["pixel_values"].dtype,
+        )
+        prompt_cache = self.vlm(**prefix_inputs, past_key_values=prompt_cache).past_key_values
+
+        dt = -1.0 / self.config.num_diffusion_steps
+        dt = torch.tensor(dt, dtype=torch.float32, device=device)
+
+        x_t = noise
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        while time >= -dt / 2:
+            past_key_values = copy.deepcopy(prompt_cache)
+            v_t = self.denoise_step(inputs, past_key_values, x_t)
+
+            # Euler step
+            x_t += dt * v_t
+            time += dt
+        return x_t
+
+    def prepare_inputs_for_generation(self, inputs, past_key_values):
+        input_ids = inputs["input_ids"]
+
+        model_inputs = {}
+        past_length = inputs["prefix_input_ids"].shape[1]
+        cache_position = torch.arange(
+            past_length, input_ids.shape[1], dtype=torch.long, device=input_ids.device
+        )
+
+        model_inputs["past_key_values"] = past_key_values
+        input_ids = input_ids[:, cache_position]
+
+        model_inputs["input_ids"] = input_ids
+        model_inputs["cache_position"] = cache_position
+
+        return model_inputs
+
+    def denoise_step(self, inputs, past_key_values, x_t):
+        """Apply one denoising step of the noise `x_t` at a given timestep."""
+
+        inputs = self.prepare_inputs_for_generation(inputs, past_key_values)
+        actions_embeds = self.action_in_proj(x_t)
+        vlm_outputs = self.vlm(**inputs, action_embeds=actions_embeds)
+
+        hidden_states = vlm_outputs.last_hidden_state
+        action_mask = inputs["input_ids"] == self.config.action_start_token_id
+        action_hidden_states = hidden_states[action_mask].view(
+            -1, self.config.chunk_size, self.config.hidden_size
+        )
+
+        v_t = self.action_out_proj(action_hidden_states)
+
+        return v_t
