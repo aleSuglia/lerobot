@@ -22,7 +22,7 @@ from lerobot.common.policies.normalize import Normalize
 from lerobot.common.policies.vlm.configuration_vlm_policy import VLMPolicyConfig
 from lerobot.common.policies.vlm.modeling_vlm_policy import VLMPolicy
 from lerobot.configs.types import FeatureType
-
+from lightning.pytorch.callbacks import ModelCheckpoint
 
 @dataclass
 class VLMCollateFunction:
@@ -156,13 +156,14 @@ def main(args):
 
     # Policies are initialized with a configuration class, in this case `DiffusionConfig`. For this example,
     # we'll just use the defaults and so no arguments other than input/output features need to be passed.
-    vlm_model_name = "Qwen/Qwen2-VL-7B-Instruct"
+    vlm_model_name = args.vlm_model_name
     vlm_config = AutoConfig.from_pretrained(vlm_model_name)
     vlm_processor = AutoProcessor.from_pretrained(vlm_model_name)
     action_start_token_id = vlm_processor.tokenizer.convert_tokens_to_ids("<|box_start|>")
 
     vlm_config.update(
-        {"num_hidden_layers": args.num_hidden_layers, "action_start_token_id": action_start_token_id}
+        {
+            "action_start_token_id": action_start_token_id}
     )
     cfg = VLMPolicyConfig(
         vlm_config=vlm_config,
@@ -209,7 +210,18 @@ def main(args):
         collate_fn=VLMCollateFunction(vlm_processor, cfg, normalize_inputs),
     )
 
-    trainer = Trainer(max_steps=num_training_steps, default_root_dir=output_directory)
+    callbacks = [
+        # saves top-K checkpoints based on "val_loss" metric
+        ModelCheckpoint(
+            every_n_train_steps=args.every_train_n_steps,
+            save_top_k=args.save_top_k,
+            monitor="train_loss",
+            filename="qwenvla-{global_step}-{train_loss:.2f}",
+            save_weights_only=True
+        )
+    ]
+
+    trainer = Trainer(max_steps=num_training_steps, default_root_dir=output_directory, callbacks=callbacks)
 
     trainer.fit(policy, train_dataloader)
 
@@ -219,6 +231,7 @@ def main(args):
 if __name__ == "__main__":
     parser = ArgumentParser()
 
+    parser.add_argument("--vlm_model_name", default="Qwen/Qwen2-VL-2B-Instruct", help="Pretrained VLM model name from HF. Assuming QwenVL-2 family.")
     parser.add_argument("--dataset", type=str, default="lerobot/pusht", help="Dataset name.")
     parser.add_argument("--num_hidden_layers", type=int, default=2, help="Number of hidden layers.")
     parser.add_argument("--learning_rate", type=float, default=5e-5, help="Learning rate.")
@@ -242,6 +255,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_directory", type=str, default="outputs/train/example_pusht_vlm", help="Output directory."
     )
+    parser.add_argument("--save_top_k", type=int, default=3)
+    parser.add_argument("--every_train_n_steps", type=int, default=5)
 
     args = parser.parse_args()
     main(args)

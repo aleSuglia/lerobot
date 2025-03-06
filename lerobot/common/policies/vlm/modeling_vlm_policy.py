@@ -15,7 +15,7 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.utils import populate_queues
 from lerobot.common.policies.vlm.action_heads import L1RegressionActionHead
 from lerobot.common.policies.vlm.configuration_vlm_policy import VLMPolicyConfig
-
+from peft import LoraConfig, TaskType, get_peft_model
 
 def pad_vector(vector, new_dim):
     """Can be (batch_size x sequence_length x features_dimension)
@@ -54,7 +54,7 @@ class VLMBackbone(Qwen2VLPreTrainedModel):
         self.model.embed_tokens = value
 
     def get_output_embeddings(self):
-        return self.lm_head
+        return None
 
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
@@ -413,15 +413,15 @@ class VLMPolicy(PreTrainedPolicy):
         # queues are populated during rollout of the policy, they contain the n latest observations and actions
         self._queues = None
 
-        self.vlm = VLMBackbone(config)
-        # self.lora_config = LoraConfig(
-        #     r=self.config.lora_r,
-        #     target_modules=self.config.lora_target_modules,
-        #     task_type=TaskType.CAUSAL_LM,
-        #     lora_alpha=self.config.lora_alpha,
-        #     lora_dropout=self.config.lora_dropout,
-        # )
-        # self.vlm = get_peft_model(self.vlm, self.lora_config)
+        self.vlm = VLMBackbone.from_pretrained(config.vlm_config.name_or_path, config=config)
+        self.lora_config = LoraConfig(
+            r=self.config.lora_r,
+            target_modules=self.config.lora_target_modules,
+            task_type=TaskType.CAUSAL_LM,
+            lora_alpha=self.config.lora_alpha,
+            lora_dropout=self.config.lora_dropout,
+        )
+        self.vlm = get_peft_model(self.vlm, self.lora_config)
 
         # the action head projects the VLM backbone output to the action space
         self.action_out_proj = L1RegressionActionHead(self.config)

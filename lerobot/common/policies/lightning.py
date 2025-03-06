@@ -22,13 +22,14 @@ class LerobotLightningWrapper(LightningModule):
     def training_step(self, batch, batch_idx):
         outputs = self.model(batch)
         loss = outputs.loss
-        self.log("train_loss", loss)
+        self.log("train_loss", loss, on_step=True)
+        self.log("global_step", self.global_step, logger=True, on_step=True, on_epoch=False)
         return loss
 
     def validation_step(self, batch, batch_idx):
         outputs = self.model(batch)
         val_loss = outputs.loss
-        self.log("val_loss", val_loss)
+        self.log("val_loss", val_loss, on_step=True)
         return val_loss
 
     @classmethod
