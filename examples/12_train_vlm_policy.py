@@ -256,7 +256,7 @@ if __name__ == "__main__":
         "--output_directory", type=str, default="outputs/train/example_pusht_vlm", help="Output directory."
     )
     parser.add_argument("--save_top_k", type=int, default=3)
-    parser.add_argument("--every_train_n_steps", type=int, default=5)
+    parser.add_argument("--every_train_n_steps", type=int, default=None)
 
     args = parser.parse_args()
     main(args)

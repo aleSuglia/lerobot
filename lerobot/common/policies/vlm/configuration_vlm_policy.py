@@ -18,6 +18,7 @@ class VLMPolicyConfig(PreTrainedConfig, Qwen2VLConfig):
     lora_alpha: int = 64
     lora_dropout: float = 0.05
     lora_target_modules: list[str] = field(default_factory=lambda: ["q_proj", "k_proj", "v_proj"])
+    
 
     # Input / output structure.
     n_obs_steps: int = 1
