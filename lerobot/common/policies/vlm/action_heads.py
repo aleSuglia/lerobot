@@ -110,7 +110,7 @@ class L1RegressionActionHead(nn.Module):
             num_blocks=2,
             input_dim=config.hidden_size,
             hidden_dim=config.hidden_size,
-            output_dim=config.max_action_dim,
+            output_dim=1,
         )
 
     def forward(self, actions_hidden_states):

@@ -46,6 +46,13 @@ class VLMCollateFunction:
             if data["observation.image"].dim() == 3:
                 data["observation.image"] = data["observation.image"].unsqueeze(0)
 
+            user_content.append(
+                {
+                    "type": "text",
+                    "text": f"Instruction: {data['task']}\n",
+                }
+            )
+
             for img, state in zip(data["observation.image"], data["observation.state"], strict=False):
                 user_content.append({"type": "image"})
                 rounded_state = [round(s, 2) for s in state.tolist()]
@@ -58,12 +65,15 @@ class VLMCollateFunction:
                 )
                 images.append(img)
 
-            user_content.append(
-                {
-                    "type": "text",
-                    "text": f"Instruction: {data['task']}\n",
-                }
-            )
+            action_chunk = []
+            num_action_dim = data["action"].shape[-1]
+
+            for i in range(self.config.chunk_size):
+                for j in range(num_action_dim):
+                    action_chunk.append("<|box_start|>")
+
+                # we ignore the separator between actions (this will delimit the axis)
+                action_chunk.append("<|box_end|>")
 
             conversation = [
                 {
@@ -78,7 +88,10 @@ class VLMCollateFunction:
                 {
                     "role": "assistant",
                     "content": [
-                        {"type": "text", "text": "".join(["<|box_start|>"] * self.config.chunk_size)},
+                        {
+                            "type": "text",
+                            "text": "".join(action_chunk),
+                        },
                     ],
                 },
             ]
@@ -96,7 +109,21 @@ class VLMCollateFunction:
             return_tensors="pt",
         )
 
-        inputs.update({"action": default_collate(actions)})
+        start_action_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|box_start|>")
+        end_action_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|box_end|>")
+
+        inputs_action_mask = (inputs.input_ids == start_action_token_id) | (
+            inputs.input_ids == end_action_token_id
+        )
+        action_mask = inputs.input_ids == start_action_token_id
+        inputs.update(
+            {
+                "action": default_collate(actions),
+                "inputs_action_mask": inputs_action_mask,
+                "action_mask": action_mask,
+            }
+        )
+
         return inputs
 
 

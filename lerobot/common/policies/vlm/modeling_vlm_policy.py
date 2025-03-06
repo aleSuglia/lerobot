@@ -15,7 +15,7 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VisionTransforme
 from lerobot.common.policies.normalize import Normalize, Unnormalize
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.utils import populate_queues
-from lerobot.common.policies.vlm.action_heads import ActionInputAdapter, L1RegressionActionHead
+from lerobot.common.policies.vlm.action_heads import L1RegressionActionHead
 from lerobot.common.policies.vlm.configuration_vlm_policy import VLMPolicyConfig
 
 
@@ -240,6 +240,7 @@ class VLMBackbone(Qwen2VLPreTrainedModel):
         rope_deltas: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         action_embeds: Optional[torch.FloatTensor] = None,
+        action_masks: Optional[torch.BoolTensor] = None,
     ) -> torch.Tensor:
         r"""
         Args:
@@ -356,8 +357,7 @@ class VLMBackbone(Qwen2VLPreTrainedModel):
 
         if action_embeds is not None and inputs_embeds is not None:
             # now given the hidden states we need to extract the positions corresponding to the actions
-            action_mask = input_ids == self.config.action_start_token_id
-            inputs_embeds[action_mask] = action_embeds.view(-1, action_embeds.shape[-1])
+            inputs_embeds[action_masks] = action_embeds.view(-1, action_embeds.shape[-1])
 
         outputs = self.model(
             input_ids=None,
@@ -415,8 +415,8 @@ class VLMPolicy(PreTrainedPolicy):
         self._queues = None
 
         self.vlm = VLMBackbone(config)
-        # the action adapter projects the action to the same dimension as the VLM backbone
-        self.action_in_proj = ActionInputAdapter(self.config)
+        # # the action adapter projects the action to the same dimension as the VLM backbone
+        # self.action_in_proj = ActionInputAdapter(self.config)
         # the action head projects the VLM backbone output to the action space
         self.action_out_proj = L1RegressionActionHead(self.config)
 
@@ -491,7 +491,7 @@ class VLMPolicy(PreTrainedPolicy):
         return action_queue.popleft()
 
     def _prepare_vlm_inputs(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        return {k: v for k, v in batch.items() if k != "action"}
+        return {k: v for k, v in batch.items() if not k.startswith("action")}
 
     def _compute_loss(self, logits, actions, actions_mask=None):
         losses = F.l1_loss(logits.view(actions.shape), actions, reduction="none")
@@ -501,33 +501,41 @@ class VLMPolicy(PreTrainedPolicy):
 
         return losses.mean()
 
-    def prepare_action(self, batch):
-        """Pad action"""
-        actions, actions_mask = pad_vector(batch["action"], self.config.max_action_dim)
-        return actions, actions_mask
+    def prepare_input_action(self, actions):
+        # append a zero tensor in the last dimension of the action tensor to represent the axis
+        # separator
+        num_action_dim = self.config.action_feature.shape[0]
+        return torch.cat([actions, actions.new_zeros(*actions.shape[:num_action_dim], 1)], -1)
 
-    def forward(
-        self,
-        batch: dict[str, torch.Tensor],
-        noise: Optional[torch.Tensor] = None,
-        time: Optional[torch.Tensor] = None,
-    ) -> VLMPolicyOutput:
+    def forward(self, batch: dict[str, torch.Tensor]) -> VLMPolicyOutput:
         """Run the batch through the model and compute the loss for training or validation."""
         batch = self.normalize_inputs(batch)
         batch = self.normalize_targets(batch)
         inputs = self._prepare_vlm_inputs(batch)
-        actions, actions_mask = self.prepare_action(batch)
+        action_labels = batch["action"]
+        inputs_action_mask = batch["inputs_action_mask"]
+        action_mask = batch["action_mask"]
+        input_actions = self.prepare_input_action(action_labels)
 
-        actions_embeds = self.action_in_proj(actions)
+        # TODO: zeros or ones
+        # Using zeros similar to OpenVLA-OFT
+        batch_size, num_steps, num_axis = input_actions.shape
+        action_inputs_embeds = input_actions.new_zeros(
+            batch_size, num_steps * num_axis, self.config.hidden_size
+        )
 
-        vlm_outputs = self.vlm(**inputs, action_embeds=actions_embeds)
+        vlm_outputs = self.vlm(
+            **inputs,
+            action_embeds=action_inputs_embeds,
+            action_masks=inputs_action_mask,
+        )
 
         hidden_states = vlm_outputs.last_hidden_state
-        action_mask = inputs["input_ids"] == self.config.action_start_token_id
         action_hidden_states = hidden_states[action_mask]
 
+        # TODO: Fix mask
         logits = self.action_out_proj(action_hidden_states)
-        loss = self._compute_loss(logits, actions, actions_mask)
+        loss = self._compute_loss(logits, action_labels, action_mask)
 
         return VLMPolicyOutput(
             logits=logits,
