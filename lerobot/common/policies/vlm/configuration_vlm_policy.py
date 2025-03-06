@@ -13,19 +13,18 @@ from lerobot.configs.types import NormalizationMode
 @PreTrainedConfig.register_subclass("vlm")
 @dataclass
 class VLMPolicyConfig(PreTrainedConfig, Qwen2VLConfig):
+    # default LORA config from PEFT
+    lora_r: int = 32
+    lora_alpha: int = 64
+    lora_dropout: float = 0.05
+    lora_target_modules: list[str] = field(default_factory=lambda: ["q_proj", "k_proj", "v_proj"])
+
     # Input / output structure.
     n_obs_steps: int = 1
     chunk_size: int = 50
     max_action_dim: int = 32
     # Decoding
     num_diffusion_steps: int = 10
-
-    # In the first stage of the training only the action adapter is trained.
-    is_stage_one_training: bool = False
-
-    # In the second stage of the training, we train everything but the vision encoder.
-    is_stage_two_training: bool = False
-
     # Number of hidden layers for the action adapter
     action_input_adapter_mlp_depth: int = 2
 

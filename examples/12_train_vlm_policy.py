@@ -144,13 +144,6 @@ def main(args):
     num_action_chunk_size = args.num_action_chunk_size
 
     # Training stages
-    is_stage_one_training = args.is_stage_one_training
-    is_stage_two_training = args.is_stage_two_training
-
-    # TODO: put this back!
-    # if not is_stage_one_training and not is_stage_two_training:
-    #     print("Please specify at least one training stage. Assuming stage two training.")
-    #     is_stage_two_training = False
 
     # When starting from scratch (i.e. not from a pretrained policy), we need to specify 2 things before
     # creating the policy:
@@ -176,8 +169,10 @@ def main(args):
         input_features=input_features,
         output_features=output_features,
         chunk_size=num_action_chunk_size,
-        is_stage_one_training=is_stage_one_training,
-        is_stage_two_training=is_stage_two_training,
+        lora_dropout=args.lora_dropout,
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_target_modules=args.lora_target_modules,
     )
 
     # We can now instantiate our policy with this config and the dataset stats.
@@ -231,8 +226,17 @@ if __name__ == "__main__":
     parser.add_argument("--num_warmup_steps", type=int, default=0, help="Number of warmup steps.")
     parser.add_argument("--log_freq", type=int, default=1, help="Logging frequency.")
     parser.add_argument("--num_action_chunk_size", type=int, default=15, help="Number of action chunk size.")
-    parser.add_argument("--is_stage_one_training", action="store_true", help="Stage one training.")
-    parser.add_argument("--is_stage_two_training", action="store_true", help="Stage two training.")
+    # LORA parameters
+    parser.add_argument("--lora_r", type=int, default=16, help="LORA r parameter.")
+    parser.add_argument("--lora_alpha", type=float, default=32, help="LORA alpha parameter.")
+    parser.add_argument("--lora_dropout", type=float, default=0.05, help="LORA dropout parameter.")
+    parser.add_argument(
+        "--lora_target_modules",
+        type=str,
+        nargs="+",
+        default=["q_proj", "k_proj", "v_proj"],
+        help="LORA target modules.",
+    )
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size.")
     parser.add_argument("--num_workers", type=int, default=0, help="Number of workers.")
     parser.add_argument(

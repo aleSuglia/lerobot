@@ -1,11 +1,9 @@
-import copy
 from collections import deque
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-from transformers.cache_utils import StaticCache
 from transformers.models.qwen2_vl import (
     Qwen2VLModel,
     Qwen2VLPreTrainedModel,
@@ -230,6 +228,7 @@ class VLMBackbone(Qwen2VLPreTrainedModel):
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
+        labels: Optional[torch.LongTensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -415,26 +414,20 @@ class VLMPolicy(PreTrainedPolicy):
         self._queues = None
 
         self.vlm = VLMBackbone(config)
-        # # the action adapter projects the action to the same dimension as the VLM backbone
-        # self.action_in_proj = ActionInputAdapter(self.config)
+        # self.lora_config = LoraConfig(
+        #     r=self.config.lora_r,
+        #     target_modules=self.config.lora_target_modules,
+        #     task_type=TaskType.CAUSAL_LM,
+        #     lora_alpha=self.config.lora_alpha,
+        #     lora_dropout=self.config.lora_dropout,
+        # )
+        # self.vlm = get_peft_model(self.vlm, self.lora_config)
+
         # the action head projects the VLM backbone output to the action space
         self.action_out_proj = L1RegressionActionHead(self.config)
 
-        if self.config.is_stage_one_training:
-            self.freeze_vlm_backbone()
-        elif self.config.is_stage_two_training:
-            self.freeze_vision_backbone()
-
-    def freeze_vlm_backbone(self):
-        for param in self.vlm.parameters():
-            param.requires_grad_(False)
-
-    def freeze_vision_backbone(self):
-        for param in self.vlm.visual.parameters():
-            param.requires_grad_(False)
-
     def get_optim_params(self) -> dict:
-        return {"vlm": self.vlm.parameters()}
+        return {"vlm": self.vlm.parameters(), "action": self.action_out_proj.parameters()}
 
     def reset(self):
         """Clear observation and action queues. Should be called on `env.reset()`"""
@@ -472,7 +465,7 @@ class VLMPolicy(PreTrainedPolicy):
             # state = self.prepare_state(batch)
             # lang_tokens, lang_masks = self.prepare_language(batch)
 
-            actions = self.sample_actions(batch)
+            actions = self.forward(batch).logits
 
             # Unpad actions
             original_action_dim = self.config.action_feature.shape[0]
@@ -491,37 +484,31 @@ class VLMPolicy(PreTrainedPolicy):
         return action_queue.popleft()
 
     def _prepare_vlm_inputs(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        return {k: v for k, v in batch.items() if not k.startswith("action")}
+        return {k: v for k, v in batch.items() if "action" not in k}
 
-    def _compute_loss(self, logits, actions, actions_mask=None):
-        losses = F.l1_loss(logits.view(actions.shape), actions, reduction="none")
+    def _compute_loss(self, logits, actions):
+        loss = F.l1_loss(logits.view(actions.shape), actions)
 
-        if actions_mask is not None:
-            losses = losses[actions_mask]
-
-        return losses.mean()
-
-    def prepare_input_action(self, actions):
-        # append a zero tensor in the last dimension of the action tensor to represent the axis
-        # separator
-        num_action_dim = self.config.action_feature.shape[0]
-        return torch.cat([actions, actions.new_zeros(*actions.shape[:num_action_dim], 1)], -1)
+        return loss
 
     def forward(self, batch: dict[str, torch.Tensor]) -> VLMPolicyOutput:
         """Run the batch through the model and compute the loss for training or validation."""
         batch = self.normalize_inputs(batch)
         batch = self.normalize_targets(batch)
         inputs = self._prepare_vlm_inputs(batch)
-        action_labels = batch["action"]
+
         inputs_action_mask = batch["inputs_action_mask"]
         action_mask = batch["action_mask"]
-        input_actions = self.prepare_input_action(action_labels)
 
-        # TODO: zeros or ones
         # Using zeros similar to OpenVLA-OFT
-        batch_size, num_steps, num_axis = input_actions.shape
-        action_inputs_embeds = input_actions.new_zeros(
-            batch_size, num_steps * num_axis, self.config.hidden_size
+        # https://github.com/moojink/openvla-oft/blob/a45877f5d291bc9e063cff3bd92909203a502c7b/prismatic/extern/hf/modeling_prismatic.py#L618
+        batch_size = action_mask.shape[0]
+        num_steps = self.config.chunk_size
+        # also add one to account for the delimiter
+        num_axis = self.config.action_feature.shape[0] + 1
+
+        action_inputs_embeds = action_mask.new_zeros(
+            batch_size, num_steps * num_axis, self.config.hidden_size, dtype=batch["pixel_values"].dtype
         )
 
         vlm_outputs = self.vlm(
@@ -531,92 +518,21 @@ class VLMPolicy(PreTrainedPolicy):
         )
 
         hidden_states = vlm_outputs.last_hidden_state
+        # now we extract only the positions that represent real actions and not the delimiter
         action_hidden_states = hidden_states[action_mask]
-
-        # TODO: Fix mask
         logits = self.action_out_proj(action_hidden_states)
-        loss = self._compute_loss(logits, action_labels, action_mask)
+
+        if "action" in batch:
+            # if we have the labels, then we compute the loss
+            action_labels = batch["action"]
+
+            loss = self._compute_loss(logits, action_labels)
+
+            return VLMPolicyOutput(
+                logits=logits,
+                loss=loss,
+            )
 
         return VLMPolicyOutput(
             logits=logits,
-            loss=loss,
         )
-
-    @torch.inference_mode()
-    def sample_actions(self, batch, noise=None) -> torch.Tensor:
-        """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
-
-        bsize = batch["input_ids"].shape[0]
-        device = batch["input_ids"].device
-        batch = self.normalize_inputs(batch)
-        batch = self.normalize_targets(batch)
-        inputs = self._prepare_vlm_inputs(batch)
-
-        if noise is None:
-            actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
-            noise = self.sample_noise(actions_shape, device)
-
-        # run a forward pass without the action embeds to get the hidden states of the part that
-        # doesn't change so that we can prefill the cache
-        prefix_inputs = dict(inputs)
-        prefix_inputs["input_ids"] = inputs["prefix_input_ids"]
-        prefix_inputs["attention_mask"] = inputs["prefix_attention_mask"]
-        del prefix_inputs["prefix_input_ids"]
-        del prefix_inputs["prefix_attention_mask"]
-        # we use the StaticCache to cache the prompt prefix before the diffusion steps
-        prompt_cache = StaticCache(
-            config=self.config,
-            max_batch_size=bsize,
-            max_cache_len=inputs["input_ids"].shape[1],
-            device=device,
-            dtype=inputs["pixel_values"].dtype,
-        )
-        prompt_cache = self.vlm(**prefix_inputs, past_key_values=prompt_cache).past_key_values
-
-        dt = -1.0 / self.config.num_diffusion_steps
-        dt = torch.tensor(dt, dtype=torch.float32, device=device)
-
-        x_t = noise
-        time = torch.tensor(1.0, dtype=torch.float32, device=device)
-        while time >= -dt / 2:
-            past_key_values = copy.deepcopy(prompt_cache)
-            v_t = self.denoise_step(inputs, past_key_values, x_t)
-
-            # Euler step
-            x_t += dt * v_t
-            time += dt
-        return x_t
-
-    def prepare_inputs_for_generation(self, inputs, past_key_values):
-        input_ids = inputs["input_ids"]
-
-        model_inputs = {}
-        past_length = inputs["prefix_input_ids"].shape[1]
-        cache_position = torch.arange(
-            past_length, input_ids.shape[1], dtype=torch.long, device=input_ids.device
-        )
-
-        model_inputs["past_key_values"] = past_key_values
-        input_ids = input_ids[:, cache_position]
-
-        model_inputs["input_ids"] = input_ids
-        model_inputs["cache_position"] = cache_position
-
-        return model_inputs
-
-    def denoise_step(self, inputs, past_key_values, x_t):
-        """Apply one denoising step of the noise `x_t` at a given timestep."""
-
-        inputs = self.prepare_inputs_for_generation(inputs, past_key_values)
-        actions_embeds = self.action_in_proj(x_t)
-        vlm_outputs = self.vlm(**inputs, action_embeds=actions_embeds)
-
-        hidden_states = vlm_outputs.last_hidden_state
-        action_mask = inputs["input_ids"] == self.config.action_start_token_id
-        action_hidden_states = hidden_states[action_mask].view(
-            -1, self.config.chunk_size, self.config.hidden_size
-        )
-
-        v_t = self.action_out_proj(action_hidden_states)
-
-        return v_t
