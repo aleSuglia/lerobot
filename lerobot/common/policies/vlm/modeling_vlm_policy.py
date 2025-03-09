@@ -1,5 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
+import re
 from typing import List, Optional, Tuple
 
 import torch
@@ -17,22 +18,108 @@ from lerobot.common.policies.vlm.action_heads import L1RegressionActionHead
 from lerobot.common.policies.vlm.configuration_vlm_policy import VLMPolicyConfig
 from peft import LoraConfig, TaskType, get_peft_model
 
-def pad_vector(vector, new_dim):
-    """Can be (batch_size x sequence_length x features_dimension)
-    or (batch_size x features_dimension)
-    """
-    if vector.shape[-1] == new_dim:
-        mask = torch.ones_like(vector, dtype=torch.bool)
-        return vector, mask
-    shape = list(vector.shape)
-    current_dim = shape[-1]
-    shape[-1] = new_dim
-    new_vector = torch.zeros(*shape, dtype=vector.dtype, device=vector.device)
-    new_vector[..., :current_dim] = vector
-    mask = torch.zeros(*shape, dtype=torch.bool, device=vector.device)
-    mask[..., :current_dim] = 1
-    return new_vector, mask
+# Copied from: https://github.com/unslothai/unsloth-zoo/blob/main/unsloth_zoo/peft_utils.py
+# Skip some modules sensitive to quantization
+SKIP_QUANTIZATION_MODULES = [
+    "lm_head",
+    "multi_modal_projector", # Llama 3.2 Vision, Pixtral, Llava
+    "merger",                # Qwen2 VL
+    "modality_projection",   # Idefics, SmolVLM
+]
 
+def get_peft_regex(
+    model,
+    finetune_vision_layers     : bool = True,
+    finetune_language_layers   : bool = True,
+    finetune_attention_modules : bool = True,
+    finetune_mlp_modules       : bool = True,
+    target_modules             : list[str] = None,
+    vision_tags                : list[str] = ["vision", "image", "visual", "patch",],
+    language_tags              : list[str] = ["language", "text",],
+    attention_tags             : list[str] = ["self_attn", "attention", "attn",],
+    mlp_tags                   : list[str] = ["mlp", "feed_forward", "ffn", "dense",],
+) -> str:
+    """
+    Create a regex pattern to apply LoRA to only select layers of a model.
+    """
+    # All Unsloth Zoo code licensed under LGPLv3
+    if not finetune_vision_layers and not finetune_language_layers:
+        raise RuntimeError(
+            "Unsloth: No layers to finetune - please select to finetune the vision and/or the language layers!"
+        )
+    if not finetune_attention_modules and not finetune_mlp_modules:
+        raise RuntimeError(
+            "Unsloth: No modules to finetune - please select to finetune the attention and/or the mlp modules!"
+        )
+    pass
+
+    from collections import Counter
+    # Get only linear layers
+    modules = model.named_modules()
+    linear_modules = [name for name, module in modules if isinstance(module, torch.nn.Linear)]
+    all_linear_modules = Counter(x.rsplit(".")[-1] for x in linear_modules)
+
+    # Isolate lm_head / projection matrices if count == 1
+    if target_modules is None:
+        only_linear_modules = []
+        projection_modules  = {}
+        for j, (proj, count) in enumerate(all_linear_modules.items()):
+            if count != 1:
+                only_linear_modules.append(proj)
+            else:
+                projection_modules[proj] = j
+        pass
+    else:
+        assert(type(target_modules) is list)
+        only_linear_modules = list(target_modules)
+    pass
+
+    # Create regex matcher
+    regex_model_parts = []
+    if finetune_vision_layers:     regex_model_parts += vision_tags
+    if finetune_language_layers:   regex_model_parts += language_tags
+    regex_components  = []
+    if finetune_attention_modules: regex_components  += attention_tags
+    if finetune_mlp_modules:       regex_components  += mlp_tags
+
+    regex_model_parts = "|".join(regex_model_parts)
+    regex_components  = "|".join(regex_components)
+
+    match_linear_modules = r"(?:" + "|".join(re.escape(x) for x in only_linear_modules) + r")"
+    regex_matcher = \
+        r".*?(?:"  + regex_model_parts + \
+        r").*?(?:" + regex_components + \
+        r").*?"    + match_linear_modules + ".*?"
+
+    # Also account for model.layers.0.self_attn/mlp type modules like Qwen
+    if finetune_language_layers:
+        regex_matcher = r"(?:" + regex_matcher + \
+        r")|(?:\bmodel\.layers\.[\d]{1,}\.(?:" + regex_components + \
+        r")\.(?:" + match_linear_modules + r"))"
+    pass
+
+    # Check if regex is wrong since model does not have vision parts
+    check = any(re.search(regex_matcher, name, flags = re.DOTALL) for name in linear_modules)
+    if not check:
+        regex_matcher = \
+            r".*?(?:" + regex_components + \
+            r").*?"   + match_linear_modules + ".*?"
+    pass
+
+    # Final check to confirm if matches exist
+    check = any(re.search(regex_matcher, name, flags = re.DOTALL) for name in linear_modules)
+    if not check and target_modules is not None:
+        raise RuntimeError(
+            f"Unsloth: No layers to finetune? You most likely specified target_modules = {target_modules} incorrectly!"
+        )
+    elif not check:
+        raise RuntimeError(
+            f"Unsloth: No layers to finetune for {model.config._name_or_path}. Please file a bug report!"
+        )
+    pass
+    return regex_matcher
+pass
+# COPY END
 
 class VLMBackbone(Qwen2VLPreTrainedModel):
     """VLM backbone for the VLM policy"""
@@ -414,9 +501,15 @@ class VLMPolicy(PreTrainedPolicy):
         self._queues = None
 
         self.vlm = VLMBackbone.from_pretrained(config.vlm_config.name_or_path, config=config)
+        target_modules = get_peft_regex(self.vlm, 
+            config.finetune_vision_layers,
+            config.finetune_language_layers,
+            config.finetune_attention_modules,
+            config.finetune_mlp_modules
+        )
         self.lora_config = LoraConfig(
             r=self.config.lora_r,
-            target_modules=self.config.lora_target_modules,
+            target_modules=target_modules,
             task_type=TaskType.CAUSAL_LM,
             lora_alpha=self.config.lora_alpha,
             lora_dropout=self.config.lora_dropout,
@@ -470,7 +563,7 @@ class VLMPolicy(PreTrainedPolicy):
             # Unpad actions
             original_action_dim = self.config.action_feature.shape[0]
 
-            actions = actions[:, :, :original_action_dim]
+            actions = actions.view(-1, self.config.chunk_size, original_action_dim)
 
             actions = self.unnormalize_outputs({"action": actions})["action"]
 

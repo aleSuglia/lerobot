@@ -17,8 +17,10 @@ class VLMPolicyConfig(PreTrainedConfig, Qwen2VLConfig):
     lora_r: int = 32
     lora_alpha: int = 64
     lora_dropout: float = 0.05
-    lora_target_modules: list[str] = field(default_factory=lambda: ["q_proj", "k_proj", "v_proj"])
-    
+    finetune_vision_layers: bool    = True
+    finetune_language_layers: bool   = True
+    finetune_attention_modules: bool = True
+    finetune_mlp_modules: bool = True
 
     # Input / output structure.
     n_obs_steps: int = 1

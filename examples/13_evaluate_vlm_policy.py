@@ -13,6 +13,8 @@ from pathlib import Path
 
 import gym_pusht  # noqa: F401
 import gymnasium as gym
+from torch.utils.data import default_collate
+from lerobot.common.envs.task_prompts import make_env_task_prompt
 import imageio
 import numpy
 import torch
@@ -31,6 +33,7 @@ class VLMCollateFunction:
     processor: AutoProcessor
     config: VLMPolicyConfig
     normalize_inputs: Normalize
+    num_action_dim: int
 
     # creates a collate function for the VLM policy which uses the Qwen2VL preprocessor
     # to generate a batch of data from the dataset
@@ -41,24 +44,11 @@ class VLMCollateFunction:
 
         for data in batch:
             user_content = []
+            # TODO: data is on CPU / normalisation constants are on CPU!
             data = self.normalize_inputs(data)
 
             if data["observation.image"].dim() == 3:
                 data["observation.image"] = data["observation.image"].unsqueeze(0)
-
-            if data["observation.state"].dim() == 1:
-                data["observation.state"] = data["observation.state"].unsqueeze(0)
-
-            for img, state in zip(data["observation.image"], data["observation.state"], strict=False):
-                user_content.append({"type": "image"})
-                rounded_state = [round(s, 2) for s in state.tolist()]
-                user_content.append(
-                    {
-                        "type": "text",
-                        "text": f"State: {rounded_state}\n",
-                    }
-                )
-                images.append(img)
 
             user_content.append(
                 {
@@ -67,17 +57,44 @@ class VLMCollateFunction:
                 }
             )
 
+            for img, state in zip(data["observation.image"], data["observation.state"], strict=False):
+                user_content.append({"type": "image"})
+                rounded_state = [round(s, 2) for s in state.tolist()]
+
+                user_content.append(
+                    {
+                        "type": "text",
+                        "text": f"State: {rounded_state}\n",
+                    },
+                )
+                images.append(img)
+
+            action_chunk = []
+
+            for i in range(self.config.chunk_size):
+                for j in range(self.num_action_dim):
+                    action_chunk.append("<|box_start|>")
+
+                # we ignore the separator between actions (this will delimit the axis)
+                action_chunk.append("<|box_end|>")
+
             conversation = [
+                {
+                    "role": "system",
+                    "content": [{"text": make_env_task_prompt("pusht")}],
+                },
                 {
                     "role": "user",
                     "content": user_content,
                 },
-                # this represents the actual set of action tokens (they will be used to make the
-                # forward pass)
+                # this represents the actual set of action tokens
                 {
                     "role": "assistant",
                     "content": [
-                        {"type": "text", "text": "".join(["<|box_start|>"] * self.config.chunk_size)},
+                        {
+                            "type": "text",
+                            "text": "".join(action_chunk),
+                        },
                     ],
                 },
             ]
@@ -95,19 +112,21 @@ class VLMCollateFunction:
             return_tensors="pt",
         )
 
-        action_token_id = self.processor.tokenizer.encode("<|box_start|>")[0]
-        x, y = torch.where(inputs["input_ids"] == action_token_id)
+        start_action_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|box_start|>")
+        end_action_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|box_end|>")
 
+        inputs_action_mask = (inputs.input_ids == start_action_token_id) | (
+            inputs.input_ids == end_action_token_id
+        )
+        action_mask = inputs.input_ids == start_action_token_id
         inputs.update(
             {
-                "prefix_input_ids": inputs["input_ids"][:, : y[0]],
-                "prefix_attention_mask": inputs["attention_mask"][:, : y[0]],
+                "inputs_action_mask": inputs_action_mask,
+                "action_mask": action_mask,
             }
         )
-        # we don't have any labels, so we just return the inputs
-        # inputs.update({"action": default_collate(actions)})
-        return inputs
 
+        return inputs
 
 def main():
     # Create a directory to store the video of the evaluation
@@ -115,16 +134,12 @@ def main():
     output_directory.mkdir(parents=True, exist_ok=True)
 
     # Select your device
-    device = "mps"
+    device = "cuda"
 
     # Provide the [hugging face repo id](https://huggingface.co/lerobot/diffusion_pusht):
     pretrained_policy_path = (
-        "outputs/train/train/pusht_vlm_stage1/lightning_logs/version_0/checkpoints/epoch=12-step=5000.ckpt"
+        "/mnt/scratch/users/as2180/lerobot_vla/pusht_vla__lr=5e5-bs=128-lora_r=64-lora_alpha=128/lightning_logs/version_0/checkpoints/qwenvla-global_step=23999.0-train_loss=0.02.ckpt"
     )
-    # OR a path to a local outputs/train folder.
-    # pretrained_policy_path = Path("outputs/train/example_pusht_diffusion")
-
-    # policy = DiffusionPolicy.from_pretrained(pretrained_policy_path, map_location=device)
     # TODO: how do we make this compatible with the original LeRobot policy?
     policy = LerobotLightningWrapper.load_from_checkpoint(pretrained_policy_path, map_location=device)
 
@@ -137,35 +152,17 @@ def main():
         max_episode_steps=300,
     )
 
-    # TODO: do we need this really?
-    # # We can verify that the shapes of the features expected by the policy match the ones from the observations
-    # # produced by the environment
-    # print(policy.config.input_features)
-    # print(env.observation_space)
-
-    # # Similarly, we can check that the actions produced by the policy will match the actions expected by the
-    # # environment
-    # print(policy.config.output_features)
-    # print(env.action_space)
-
     # Reset the policy and environments to prepare for rollout
     policy.model.reset()
-    # When starting from scratch (i.e. not from a pretrained policy), we need to specify 2 things before
-    # creating the policy:
-    #   - input/output shapes: to properly size the policy
-    #   - dataset stats: for normalization and denormalization of input/outputs
-    dataset_metadata = LeRobotDatasetMetadata("lerobot/pusht")
-    features = dataset_to_policy_features(dataset_metadata.features)
-    output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
-    input_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.STATE}
 
     # Policies are initialized with a configuration class, in this case `DiffusionConfig`. For this example,
     # we'll just use the defaults and so no arguments other than input/output features need to be passed.
     vlm_model_name = "Qwen/Qwen2-VL-7B-Instruct"
     vlm_processor = AutoProcessor.from_pretrained(vlm_model_name)
     cfg = policy.model.config
-    normalize_inputs = Normalize(cfg.input_features, cfg.normalization_mapping, dataset_metadata.stats)
-    vlm_collate = VLMCollateFunction(vlm_processor, cfg, normalize_inputs)
+    normalize_inputs = policy.model.normalize_inputs.to("cpu")
+    num_action_dim = env.action_space.shape[0]
+    vlm_collate = VLMCollateFunction(vlm_processor, cfg, normalize_inputs, num_action_dim=num_action_dim)
 
     numpy_observation, info = env.reset(seed=42)
 
@@ -173,6 +170,8 @@ def main():
     # from initial state to final state.
     rewards = []
     frames = []
+    states = []
+    actions = []
 
     # Render frame of the initial state
     frames.append(env.render())
@@ -182,9 +181,10 @@ def main():
 
     while not done:
         # Prepare observation for the policy running in Pytorch
-        state = torch.from_numpy(numpy_observation["agent_pos"])
-        image = torch.from_numpy(numpy_observation["pixels"])
+        state = torch.from_numpy(numpy_observation["agent_pos"]).unsqueeze(0)
+        image = torch.from_numpy(numpy_observation["pixels"]).unsqueeze(0)
 
+        states.append(state)
         state = state.to(torch.float32)
 
         batch = [{"observation.state": state, "observation.image": image, "task": instruction}]
@@ -193,11 +193,13 @@ def main():
 
         # Predict the next action with respect to the current observation
         with torch.inference_mode():
+            policy_inputs = {key: value.to(device) for key, value in policy_inputs.items()}
             # TODO: then we pass the policy_inputs to the model; the rest must be the same
             action = policy.model.select_action(policy_inputs)
 
         # Prepare the action for the environment
         numpy_action = action.squeeze(0).to("cpu").numpy()
+        actions.append(numpy_action)
 
         # Step through the environment and receive a new observation
         numpy_observation, reward, terminated, truncated, info = env.step(numpy_action)
@@ -217,6 +219,8 @@ def main():
     else:
         print("Failure!")
 
+    env.close()
+
     # Get the speed of environment (i.e. its number of frames per second).
     fps = env.metadata["render_fps"]
 
@@ -225,7 +229,6 @@ def main():
     imageio.mimsave(str(video_path), numpy.stack(frames), fps=fps)
 
     print(f"Video of the evaluation is available in '{video_path}'.")
-
 
 if __name__ == "__main__":
     main()

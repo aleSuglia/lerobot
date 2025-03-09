@@ -172,15 +172,14 @@ def main(args):
         chunk_size=num_action_chunk_size,
         lora_dropout=args.lora_dropout,
         lora_r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_target_modules=args.lora_target_modules,
+        lora_alpha=args.lora_alpha
     )
 
     # We can now instantiate our policy with this config and the dataset stats.
     policy = VLMPolicy(cfg, dataset_stats=dataset_metadata.stats)
     policy = LerobotLightningWrapper(
         policy,
-        model_config=cfg.to_dict(),  # save the model config in the checkpoint
+        model_config=cfg,  # save the model config in the checkpoint
         dataset_stats=dataset_metadata.stats,
         learning_rate=args.learning_rate,
         num_training_steps=num_training_steps,
@@ -221,7 +220,7 @@ def main(args):
         )
     ]
 
-    trainer = Trainer(max_steps=num_training_steps, default_root_dir=output_directory, callbacks=callbacks)
+    trainer = Trainer(max_steps=num_training_steps, default_root_dir=output_directory, callbacks=callbacks, accumulate_grad_batches=args.accumulate_grad_batches)
 
     trainer.fit(policy, train_dataloader)
 
@@ -243,13 +242,6 @@ if __name__ == "__main__":
     parser.add_argument("--lora_r", type=int, default=16, help="LORA r parameter.")
     parser.add_argument("--lora_alpha", type=float, default=32, help="LORA alpha parameter.")
     parser.add_argument("--lora_dropout", type=float, default=0.05, help="LORA dropout parameter.")
-    parser.add_argument(
-        "--lora_target_modules",
-        type=str,
-        nargs="+",
-        default=["q_proj", "k_proj", "v_proj"],
-        help="LORA target modules.",
-    )
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size.")
     parser.add_argument("--num_workers", type=int, default=0, help="Number of workers.")
     parser.add_argument(
@@ -257,6 +249,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--save_top_k", type=int, default=3)
     parser.add_argument("--every_train_n_steps", type=int, default=None)
+    parser.add_argument("--accumulate_grad_batches", type=int, default=None)
 
     args = parser.parse_args()
     main(args)
