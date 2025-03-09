@@ -170,8 +170,6 @@ def main():
     # from initial state to final state.
     rewards = []
     frames = []
-    states = []
-    actions = []
 
     # Render frame of the initial state
     frames.append(env.render())
@@ -183,8 +181,6 @@ def main():
         # Prepare observation for the policy running in Pytorch
         state = torch.from_numpy(numpy_observation["agent_pos"]).unsqueeze(0)
         image = torch.from_numpy(numpy_observation["pixels"]).unsqueeze(0)
-
-        states.append(state)
         state = state.to(torch.float32)
 
         batch = [{"observation.state": state, "observation.image": image, "task": instruction}]
@@ -194,12 +190,10 @@ def main():
         # Predict the next action with respect to the current observation
         with torch.inference_mode():
             policy_inputs = {key: value.to(device) for key, value in policy_inputs.items()}
-            # TODO: then we pass the policy_inputs to the model; the rest must be the same
             action = policy.model.select_action(policy_inputs)
 
         # Prepare the action for the environment
         numpy_action = action.squeeze(0).to("cpu").numpy()
-        actions.append(numpy_action)
 
         # Step through the environment and receive a new observation
         numpy_observation, reward, terminated, truncated, info = env.step(numpy_action)
