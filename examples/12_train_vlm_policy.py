@@ -172,7 +172,8 @@ def main(args):
         chunk_size=num_action_chunk_size,
         lora_dropout=args.lora_dropout,
         lora_r=args.lora_r,
-        lora_alpha=args.lora_alpha
+        lora_alpha=args.lora_alpha,
+        action_loss=args.action_loss
     )
 
     # We can now instantiate our policy with this config and the dataset stats.
@@ -238,6 +239,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_warmup_steps", type=int, default=0, help="Number of warmup steps.")
     parser.add_argument("--log_freq", type=int, default=1, help="Logging frequency.")
     parser.add_argument("--num_action_chunk_size", type=int, default=15, help="Number of action chunk size.")
+    parser.add_argument("--action_loss", type=str, default="mse", choices=["mse", "l1"])
     # LORA parameters
     parser.add_argument("--lora_r", type=int, default=16, help="LORA r parameter.")
     parser.add_argument("--lora_alpha", type=float, default=32, help="LORA alpha parameter.")
@@ -249,7 +251,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--save_top_k", type=int, default=3)
     parser.add_argument("--every_train_n_steps", type=int, default=None)
-    parser.add_argument("--accumulate_grad_batches", type=int, default=None)
+    parser.add_argument("--accumulate_grad_batches", type=int, default=1)
 
     args = parser.parse_args()
     main(args)

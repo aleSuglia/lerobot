@@ -580,8 +580,12 @@ class VLMPolicy(PreTrainedPolicy):
         return {k: v for k, v in batch.items() if "action" not in k}
 
     def _compute_loss(self, logits, actions):
-        loss = F.l1_loss(logits.view(actions.shape), actions)
-
+        if self.config.action_loss == "mse":
+            loss = F.mse_loss(logits.view(actions.shape), actions)
+        elif self.config.action_loss == "l1":
+            loss = F.l1_loss(logits.view(actions.shape), actions)
+        else:
+            raise ValueError(f"Invalid action loss selected {self.config.action_loss}")
         return loss
 
     def forward(self, batch: dict[str, torch.Tensor]) -> VLMPolicyOutput:

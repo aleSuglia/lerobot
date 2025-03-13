@@ -22,12 +22,14 @@ class VLMPolicyConfig(PreTrainedConfig, Qwen2VLConfig):
     finetune_attention_modules: bool = True
     finetune_mlp_modules: bool = True
 
+    # loss
+    action_loss: str = "mse"
+
     # Input / output structure.
     n_obs_steps: int = 1
     chunk_size: int = 50
     max_action_dim: int = 32
-    # Decoding
-    num_diffusion_steps: int = 10
+    
     # Number of hidden layers for the action adapter
     action_input_adapter_mlp_depth: int = 2
 
